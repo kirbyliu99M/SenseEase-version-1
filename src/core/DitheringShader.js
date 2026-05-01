@@ -63,7 +63,8 @@ export class DitheringShader {
       uniform float u_intensity;
 
       float rand(vec2 co){
-        return fract(sin(dot(co.xy ,vec2(12.9898,78.233))) * 43758.5453);
+        float dt = mod(dot(co, vec2(12.9898, 78.233)), 3.14159265);
+        return fract(sin(dt) * 43758.5453);
       }
 
       void main() {
@@ -83,8 +84,8 @@ export class DitheringShader {
         float r_px = (distPx / max(maxDistPx, 1.0)) * 100.0;
         
         float p = clamp((r_px - u_rIn) / (u_rOut - u_rIn), 0.0, 1.0);
-        // 使用像素座標作為亂數種子 (比 v_uv 精度更高，避免在部分 GPU 驅動產生橫條帶狀色帶)
-        float nr = rand(px);
+        // floor(px)/resolution 量化到單像素 UV，mod 限制 sin 參數在 [0,PI] 避免 GPU 精度損失
+        float nr = rand(floor(px) / u_resolution);
         
         if (nr < p) {
           // 灰黑色遮罩 - 結合 u_intensity 進行淡入淡出 (Premultiplied Alpha)
