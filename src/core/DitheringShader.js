@@ -83,8 +83,8 @@ export class DitheringShader {
         float r_px = (distPx / max(maxDistPx, 1.0)) * 100.0;
         
         float p = clamp((r_px - u_rIn) / (u_rOut - u_rIn), 0.0, 1.0);
-        // 使用固定的 uv 作為亂數種子，避免每幀更新產生電視雜訊般的劇烈閃爍
-        float nr = rand(v_uv);
+        // 使用像素座標作為亂數種子 (比 v_uv 精度更高，避免在部分 GPU 驅動產生橫條帶狀色帶)
+        float nr = rand(px);
         
         if (nr < p) {
           // 灰黑色遮罩 - 結合 u_intensity 進行淡入淡出 (Premultiplied Alpha)
