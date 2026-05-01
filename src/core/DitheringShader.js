@@ -22,9 +22,9 @@ export class DitheringShader {
     return !!this.gl;
   }
 
-  resize() {
-    this.canvas.width = window.innerWidth;
-    this.canvas.height = window.innerHeight;
+  resize(width, height) {
+    this.canvas.width  = width  || window.innerWidth;
+    this.canvas.height = height || window.innerHeight;
     if (this.gl) {
       this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     }
