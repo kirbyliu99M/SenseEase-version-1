@@ -88,16 +88,19 @@ export class DitheringShader {
         float nr = rand(floor(px) / u_resolution);
         
         if (nr < p) {
-          // 灰黑色遮罩 - 結合 u_intensity 進行淡入淡出 (Premultiplied Alpha)
-          vec4 maskColor = vec4(0.04 * u_intensity, 0.04 * u_intensity, 0.04 * u_intensity, 0.4 * u_intensity);
-          
-          float gridX = mod(px.x, 80.0);
-          float gridY = mod(px.y, 80.0);
-          // 深灰色近透明框線 - 結合 u_intensity
-          if(gridX < 1.0 || gridY < 1.0) {
-             maskColor = vec4(0.03 * u_intensity, 0.03 * u_intensity, 0.03 * u_intensity, 0.15 * u_intensity); 
+          // 輕量遮罩：降低不透明度減少對畫面的干擾
+          vec4 maskColor = vec4(0.07 * u_intensity, 0.07 * u_intensity, 0.07 * u_intensity, 0.25 * u_intensity);
+
+          // 120px 間距的方格，smoothstep 反鋸齒讓線條柔和細緻
+          float gridX = mod(px.x, 120.0);
+          float gridY = mod(px.y, 120.0);
+          float lineX = 1.0 - smoothstep(0.0, 1.2, min(gridX, 120.0 - gridX));
+          float lineY = 1.0 - smoothstep(0.0, 1.2, min(gridY, 120.0 - gridY));
+          float lineStrength = max(lineX, lineY) * 0.07 * u_intensity;
+          if (lineStrength > 0.005) {
+            maskColor = vec4(0.06 * u_intensity, 0.06 * u_intensity, 0.06 * u_intensity, lineStrength);
           }
-          
+
           gl_FragColor = maskColor;
         } else {
           gl_FragColor = vec4(0.0);
