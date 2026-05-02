@@ -218,6 +218,7 @@ function getTheaterTarget() {
   const map = {
     'demo-scen1': 'video-wrapper',
     'demo-scen2': 'ticker-box',
+    'demo-scen3': 'demo-scen3',
     'demo-scen4': 'office-wrapper',
     'demo-scen5': 'habituation-wrapper',
   };
@@ -260,6 +261,11 @@ function setDemoTarget(demoId) {
     console.assert(!!tickerBox, '[setDemoTarget] Scenario 2 ticker-box missing.');
     renderController.setTargetElement(null);
     observer.setTarget(tickerBox, 'container');
+  } else if (demoId === 'demo-scen3') {
+    const desTarget = document.querySelector('.des-container');
+    console.assert(!!desTarget, '[setDemoTarget] Scenario 3 des-container missing.');
+    renderController.setTargetElement(null);
+    observer.setTarget(desTarget, 'container');
   } else if (demoId === 'demo-scen4') {
     const officeVideoEl = document.getElementById('office-video');
     console.assert(!!officeVideoEl, '[setDemoTarget] Scenario 4 office-video missing.');
@@ -269,6 +275,7 @@ function setDemoTarget(demoId) {
     const hv = document.getElementById('habituation-video');
     console.assert(!!hv, '[setDemoTarget] Scenario 5 habituation-video missing.');
     observer.setTarget(hv, 'video');
+    observer.setVideoState(!!hv && !hv.paused && !hv.ended);
     if (hv && !hv.paused) {
       renderController.setTargetElement(document.getElementById('habituation-wrapper'));
     } else {
@@ -971,6 +978,7 @@ if (habVideo) {
   habVideo.addEventListener('play', () => {
     syncHabUI();
     observer.setTarget(habVideo, 'video');
+    observer.setVideoState(true);
     renderController.setTargetElement(document.getElementById('habituation-wrapper'));
     inferenceEngine.setGlobalOverride(true);
 
@@ -995,9 +1003,15 @@ if (habVideo) {
     }
     requestAnimationFrame(entryLoop);
   });
+  habVideo.addEventListener('playing', () => {
+    syncHabUI();
+    observer.setTarget(habVideo, 'video');
+    observer.setVideoState(true);
+  });
   habVideo.addEventListener('pause', () => {
     syncHabUI();
     observer.setTarget(habVideo, 'video');
+    observer.setVideoState(false);
     stopHabEngine();
     clearTimeout(habWeakenTO);
     clearTimeout(habPenaltyTO);
@@ -1010,6 +1024,7 @@ if (habVideo) {
   habVideo.addEventListener('ended', () => {
     syncHabUI();
     observer.setTarget(habVideo, 'video');
+    observer.setVideoState(false);
     stopHabEngine();
     clearTimeout(habWeakenTO);
     clearTimeout(habPenaltyTO);
@@ -1048,7 +1063,8 @@ chatbotUI.onWeaken = () => {
 // ======================================================
 // Statistics Dashboard — Chart.js charts
 // ======================================================
-let vimsChart = null;
+let vimsChartProtected = null;
+let vimsChartBaseline = null;
 let desChart  = null;
 let desFatigue      = 0;   // with protection
 let desFatigueRaw   = 0;   // without protection
@@ -1058,11 +1074,15 @@ let statPeakPressure = 0;
 let statWasMaskActive = false;
 const statsSessionStart = Date.now();
 let desProtectionHistory = []; // parallel bool array: was DES protection on at each second?
+let baselinePressure = 0;
+let baselineFlowHistory = [];
+let baselinePressureHistory = [];
 
 function initCharts() {
-  const vimsCtx = document.getElementById('chart-vims');
+  const vimsProtectedCtx = document.getElementById('chart-vims-protected');
+  const vimsBaselineCtx = document.getElementById('chart-vims-baseline');
   const desCtx  = document.getElementById('chart-des');
-  if (!vimsCtx || !desCtx || typeof Chart === 'undefined') return;
+  if (!vimsProtectedCtx || !vimsBaselineCtx || !desCtx || typeof Chart === 'undefined') return;
 
   const sharedOptions = {
     animation: false,
@@ -1076,13 +1096,25 @@ function initCharts() {
     },
   };
 
-  vimsChart = new Chart(vimsCtx, {
+  vimsChartProtected = new Chart(vimsProtectedCtx, {
     type: 'line',
     data: {
       labels: [],
       datasets: [
-        { label: 'Optical Flow', data: [], borderColor: '#9ca3af', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false },
+        { label: 'Effective Flow', data: [], borderColor: '#9ca3af', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false },
         { label: 'VIMS Pressure', data: [], borderColor: '#024AD8', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: { target: 'origin', above: 'rgba(2,74,216,0.07)' } },
+      ],
+    },
+    options: { ...sharedOptions, scales: { ...sharedOptions.scales, y: { ...sharedOptions.scales.y, max: 200 } } },
+  });
+
+  vimsChartBaseline = new Chart(vimsBaselineCtx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        { label: 'Raw Flow', data: [], borderColor: '#9ca3af', borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: false },
+        { label: 'Projected Pressure (No NPU)', data: [], borderColor: '#E54747', borderWidth: 2, pointRadius: 0, tension: 0.3, fill: { target: 'origin', above: 'rgba(229,71,71,0.07)' } },
       ],
     },
     options: { ...sharedOptions, scales: { ...sharedOptions.scales, y: { ...sharedOptions.scales.y, max: 200 } } },
@@ -1117,12 +1149,16 @@ function updateCharts() {
   const elIF = document.getElementById('stat-intercepts');
   const elPF = document.getElementById('stat-peak-flow');
   const elPP = document.getElementById('stat-peak-pressure');
+  const elLiveProtectedFlow = document.getElementById('stat-live-protected-flow');
+  const elLiveProtectedPressure = document.getElementById('stat-live-protected-pressure');
+  const elLiveBaselineFlow = document.getElementById('stat-live-baseline-flow');
+  const elLiveBaselinePressure = document.getElementById('stat-live-baseline-pressure');
   if (elUp) elUp.innerText = uptimeStr;
   if (elIF) elIF.innerText = statIntercepts;
   if (elPF) elPF.innerText = statPeakFlow.toFixed(1);
   if (elPP) elPP.innerText = statPeakPressure.toFixed(1);
 
-  if (!vimsChart || !desChart) return;
+  if (!vimsChartProtected || !vimsChartBaseline || !desChart) return;
 
   // DES fatigue: baseline +1/s, with protection +0.3/s
   const desOn = document.querySelector('.des-container.bright-room, .des-container.dark-room') !== null
@@ -1130,11 +1166,36 @@ function updateCharts() {
   desFatigueRaw += 1;
   desFatigue    += desOn ? 0.3 : 1;
 
+  const rawFlow = inferenceEngine.observer.opticalFlow;
+  const weight = inferenceEngine.passiveFlowWeight * 0.05;
+  if (rawFlow < inferenceEngine.noiseGateThreshold) {
+    baselinePressure = Math.max(0, baselinePressure * 0.965);
+  } else {
+    baselinePressure = Math.max(0, (baselinePressure * 0.98) + (rawFlow * weight));
+  }
+
+  if (elLiveProtectedFlow) elLiveProtectedFlow.innerText = inferenceEngine.flowHistory.length
+    ? inferenceEngine.flowHistory[inferenceEngine.flowHistory.length - 1].toFixed(1)
+    : '0.0';
+  if (elLiveProtectedPressure) elLiveProtectedPressure.innerText = pressure.toFixed(1);
+  if (elLiveBaselineFlow) elLiveBaselineFlow.innerText = rawFlow.toFixed(1);
+  if (elLiveBaselinePressure) elLiveBaselinePressure.innerText = baselinePressure.toFixed(1);
+
   const labels = inferenceEngine.timeHistory.map(t => `${t}s`);
-  vimsChart.data.labels              = labels;
-  vimsChart.data.datasets[0].data    = inferenceEngine.flowHistory;
-  vimsChart.data.datasets[1].data    = inferenceEngine.pressureHistory;
-  vimsChart.update('none');
+  baselineFlowHistory.push(parseFloat(rawFlow.toFixed(1)));
+  baselinePressureHistory.push(parseFloat(baselinePressure.toFixed(1)));
+  if (baselineFlowHistory.length > 120) baselineFlowHistory.shift();
+  if (baselinePressureHistory.length > 120) baselinePressureHistory.shift();
+
+  vimsChartProtected.data.labels = labels;
+  vimsChartProtected.data.datasets[0].data = inferenceEngine.flowHistory;
+  vimsChartProtected.data.datasets[1].data = inferenceEngine.pressureHistory;
+  vimsChartProtected.update('none');
+
+  vimsChartBaseline.data.labels = labels;
+  vimsChartBaseline.data.datasets[0].data = baselineFlowHistory;
+  vimsChartBaseline.data.datasets[1].data = baselinePressureHistory;
+  vimsChartBaseline.update('none');
 
   // DES chart: rolling window matching timeHistory length
   const len = inferenceEngine.timeHistory.length;

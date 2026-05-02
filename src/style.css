@@ -171,8 +171,13 @@
 .theater-fullscreen {
   position: fixed !important;
   top: 0 !important; left: 0 !important;
-  width: 100vw !important; height: 100vh !important;
-  max-width: none !important;
+  right: 0 !important; bottom: 0 !important;
+  width: auto !important; height: auto !important;
+  max-width: none !important; max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  background: #000 !important;
   z-index: 9992 !important;
   border-radius: 0 !important;
 }

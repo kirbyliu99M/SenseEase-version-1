@@ -2,12 +2,14 @@ export class DitheringShader {
   constructor() {
     this.canvas = document.createElement('canvas');
     this.canvas.id = 'dithering-canvas';
-    this.gl = this.canvas.getContext('webgl', { alpha: true, preserveDrawingBuffer: false });
+    this.gl = this.canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, preserveDrawingBuffer: false });
     this.isActive = false;
     this.gpuTimeMs = 0;
     
     this.rIn = 35.0; 
     this.rOut = 45.0;
+    this._lastW = 0;
+    this._lastH = 0;
     
     if (!this.gl) {
       console.warn('WebGL not supported, will use CSS fallback.');
@@ -23,10 +25,17 @@ export class DitheringShader {
   }
 
   resize(width, height) {
-    this.canvas.width  = width  || window.innerWidth;
-    this.canvas.height = height || window.innerHeight;
+    const w = (width  || window.innerWidth)  | 0;
+    const h = (height || window.innerHeight) | 0;
+    // Only touch canvas dimensions when they actually change — avoids
+    // pixel-grid instability that causes dithering flicker.
+    if (w === this._lastW && h === this._lastH) return;
+    this._lastW = w;
+    this._lastH = h;
+    this.canvas.width  = w;
+    this.canvas.height = h;
     if (this.gl) {
-      this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+      this.gl.viewport(0, 0, w, h);
     }
   }
 
@@ -51,7 +60,13 @@ export class DitheringShader {
       }
     `;
 
-    // 機率抖動演算法 (Dithering) p = (r_px - r_in) / (r_out - r_in)
+    // Chang-Hain (CH) Framework — Three-zone FOV mask with Stationary Anchor Grid
+    // Zone 1 (r < rIn):  Fully transparent — clear foveal vision
+    // Zone 2 (rIn→rOut): Smooth dark mask gradient (Destabilizing flow attenuation)
+    //                     NO grid here — smooth transition only
+    // Zone 3 (r > rOut): Dark mask + WHITE stationary anchor grid
+    //                     Grid = Stabilizing effect (S): locked to screen coordinates,
+    //                     provides vestibular ground-truth for adaptive recalibration
     const fsSource = `
       precision highp float;
       varying vec2 v_uv;
@@ -62,46 +77,44 @@ export class DitheringShader {
       uniform float u_time;
       uniform float u_intensity;
 
-      float rand(vec2 co){
-        float dt = mod(dot(co, vec2(12.9898, 78.233)), 3.14159265);
-        return fract(sin(dt) * 43758.5453);
-      }
-
       void main() {
         vec2 px = v_uv * u_resolution;
         vec2 center = u_center * u_resolution;
-        vec2 diff = px - center;
-        // 恢復正圓形，確保 FOV 是從邊角開始遮蔽
-        float distPx = length(diff);
-        
-        // Use the farthest corner distance from the gaze center so edge coverage
-        // remains complete even when the center is near a screen boundary.
-        float d1 = length(center - vec2(0.0, 0.0));
+        float distPx = length(px - center);
+
+        // Corner-distance normalization for full edge coverage
+        float d1 = length(center);
         float d2 = length(center - vec2(u_resolution.x, 0.0));
         float d3 = length(center - vec2(0.0, u_resolution.y));
-        float d4 = length(center - vec2(u_resolution.x, u_resolution.y));
+        float d4 = length(center - u_resolution);
         float maxDistPx = max(max(d1, d2), max(d3, d4));
         float r_px = (distPx / max(maxDistPx, 1.0)) * 100.0;
-        
-        float p = clamp((r_px - u_rIn) / (u_rOut - u_rIn), 0.0, 1.0);
-        // floor(px)/resolution 量化到單像素 UV，mod 限制 sin 參數在 [0,PI] 避免 GPU 精度損失
-        float nr = rand(floor(px) / u_resolution);
-        
-        if (nr < p) {
-          // 輕量遮罩：降低不透明度減少對畫面的干擾
-          vec4 maskColor = vec4(0.07 * u_intensity, 0.07 * u_intensity, 0.07 * u_intensity, 0.25 * u_intensity);
 
-          // 120px 間距的方格，smoothstep 反鋸齒讓線條柔和細緻
-          float gridX = mod(px.x, 120.0);
-          float gridY = mod(px.y, 120.0);
-          float lineX = 1.0 - smoothstep(0.0, 1.2, min(gridX, 120.0 - gridX));
-          float lineY = 1.0 - smoothstep(0.0, 1.2, min(gridY, 120.0 - gridY));
-          float lineStrength = max(lineX, lineY) * 0.07 * u_intensity;
-          if (lineStrength > 0.005) {
-            maskColor = vec4(0.06 * u_intensity, 0.06 * u_intensity, 0.06 * u_intensity, lineStrength);
-          }
+        // ── Smooth transition gradient (rIn → rOut → beyond) ──
+        float transP = clamp((r_px - u_rIn) / max(u_rOut - u_rIn, 0.1), 0.0, 1.0);
+        transP = transP * transP * (3.0 - 2.0 * transP);  // hermite smoothstep
 
-          gl_FragColor = maskColor;
+        // Stable peripheral mask opacity (no random grain flicker)
+        float maskAlpha = transP * (0.16 + 0.14 * u_intensity);
+
+        // ── CH Stationary Anchor Grid (WHITE, translucent, screen-locked) ──
+        // Grid strength driven by transP² — naturally fades in toward periphery,
+        // no separate zone boundary. Quadratic growth = barely visible in
+        // transition zone, prominent only in deep periphery.
+        float gridSpacing = 40.0;
+        float gx = mod(px.x, gridSpacing);
+        float gy = mod(px.y, gridSpacing);
+        float lineX = 1.0 - smoothstep(0.0, 1.2, min(gx, gridSpacing - gx));
+        float lineY = 1.0 - smoothstep(0.0, 1.2, min(gy, gridSpacing - gy));
+        float gridLine = max(lineX, lineY);
+        float gridAlpha = gridLine * transP * transP * (0.05 + 0.07 * u_intensity);
+
+        if (gridAlpha > 0.003) {
+          // WHITE anchor grid — Stabilizing effect (S)
+          gl_FragColor = vec4(1.0, 1.0, 1.0, gridAlpha);
+        } else if (maskAlpha > 0.002) {
+          // Dark peripheral mask (calm/consistent)
+          gl_FragColor = vec4(vec3(0.06), maskAlpha);
         } else {
           gl_FragColor = vec4(0.0);
         }

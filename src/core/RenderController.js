@@ -14,6 +14,8 @@ export class RenderController {
     this.eyeTracker = null;
     this.inferenceEngine = null;
     this.currentIntensity = 0.0;
+    this.targetIntensitySmoothed = 0.0;
+    this.maskVisible = false;
     this.currentRadiusInner = 130.0;
     this.userRadiusOffset = 0;
     this.radiusOverride = null;
@@ -49,8 +51,11 @@ export class RenderController {
 
   enforceKillSwitch() {
     this.currentIntensity = 0;
+    this.targetIntensitySmoothed = 0;
+    this.maskVisible = false;
     if (this.inferenceEngine) {
-      this.inferenceEngine.pressure = 0;
+      // Kill-switch only controls rendering/mask visibility.
+      // Do not mutate VIMS pressure here; pressure is owned by InferenceEngine.
       this.inferenceEngine.isMaskActive = false;
     }
     this.forceHideMaskLayers();
@@ -60,6 +65,8 @@ export class RenderController {
     this.targetElement = el;
     if (!el) {
       this.currentIntensity = 0;
+      this.targetIntensitySmoothed = 0;
+      this.maskVisible = false;
       this.forceHideMaskLayers();
     }
   }
@@ -81,6 +88,8 @@ export class RenderController {
       // NPU may be active for non-FOV scenarios (e.g., Demo 2); keep layers hidden.
       if (!this.targetElement) {
         this.currentIntensity = 0;
+        this.targetIntensitySmoothed = 0;
+        this.maskVisible = false;
         this.forceHideMaskLayers();
         requestAnimationFrame(renderLoop);
         return;
@@ -91,13 +100,34 @@ export class RenderController {
       const currentFlow = this.observer ? this.observer.opticalFlow : 0;
       const currentPressure = this.inferenceEngine ? this.inferenceEngine.getPressure() : 0;
 
-      let targetIntensity = (currentFlow / 80.0) + (currentPressure / 100.0);
-      if (this.inferenceEngine?.isGlobalOverrideOn) targetIntensity = 1.0;
-      targetIntensity = Math.max(0.0, Math.min(1.0, targetIntensity));
+      const flowTerm = Math.max(0, Math.min(1, currentFlow / 120.0));
+      const pressureTerm = Math.max(0, Math.min(1, currentPressure / 100.0));
+      const adaptiveIntensity = Math.max(0.0, Math.min(1.0, (flowTerm * 0.35) + (pressureTerm * 0.85)));
 
-      this.currentIntensity += (targetIntensity - this.currentIntensity) * 0.05;
+      const activeDemoId = document.querySelector('#demo-sub-tabs .demo-sub-btn.active')?.dataset.demo;
+      const isHabituationDemo = activeDemoId === 'demo-scen5';
 
-      if (this.currentIntensity > 0.005) {
+      let targetIntensity = adaptiveIntensity;
+      if (this.inferenceEngine?.isGlobalOverrideOn) {
+        // Scenario 1 keeps full forced visibility; Habituation keeps adaptive tone but with a visible floor.
+        targetIntensity = isHabituationDemo ? Math.max(0.55, adaptiveIntensity) : 1.0;
+      }
+
+      const targetFilter = targetIntensity > this.targetIntensitySmoothed ? 0.20 : 0.10;
+      this.targetIntensitySmoothed += (targetIntensity - this.targetIntensitySmoothed) * targetFilter;
+
+      const response = this.targetIntensitySmoothed > this.currentIntensity ? 0.16 : 0.06;
+      const nextIntensity = this.currentIntensity + (this.targetIntensitySmoothed - this.currentIntensity) * response;
+      const maxStep = 0.035;
+      const delta = Math.max(-maxStep, Math.min(maxStep, nextIntensity - this.currentIntensity));
+      this.currentIntensity = Math.max(0, Math.min(1, this.currentIntensity + delta));
+
+      const SHOW_THRESHOLD = 0.018;
+      const HIDE_THRESHOLD = 0.008;
+      if (!this.maskVisible && this.currentIntensity >= SHOW_THRESHOLD) this.maskVisible = true;
+      if (this.maskVisible && this.currentIntensity <= HIDE_THRESHOLD) this.maskVisible = false;
+
+      if (this.maskVisible) {
         let gazeX = rect.width / 2;
         let gazeY = rect.height / 2;
 
@@ -175,6 +205,8 @@ export class RenderController {
   triggerFOVMask(directionX = 0) {
     this.directionX = directionX;
     this.npuActive = true;
+    // Reset chatbot offset on re-trigger so mask is effective again
+    this.userRadiusOffset = 0;
     this.showMaskLayers();
   }
 
@@ -207,7 +239,7 @@ export class RenderController {
         rgba(10,15,20, ${a}) 200vmax),
       linear-gradient(rgba(255,255,255,${gridAlpha}) 1px, transparent 1px),
       linear-gradient(90deg, rgba(255,255,255,${gridAlpha}) 1px, transparent 1px)`;
-    ov.style.backgroundSize = '100% 100%, 80px 80px, 80px 80px';
+    ov.style.backgroundSize = '100% 100%, 40px 40px, 40px 40px';
   }
 
   tightenMask() {
